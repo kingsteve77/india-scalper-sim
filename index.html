@@ -1,0 +1,187 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>NSE 10-Min Signal Tool</title>
+<style>
+:root{--bg:#f6f7f9;--card:#fff;--tx:#14181f;--mut:#667085;--bd:#e3e6ea;--ac:#2563eb;--g:#12805c;--r:#c4312f;--y:#b7791f;
+box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+@media(prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#0e1116;--card:#171b22;--tx:#e8ebf0;--mut:#98a2b3;--bd:#2a303a;--ac:#6ea0ff;--g:#35c48d;--r:#ff6b68;--y:#f5b94a}}
+*{box-sizing:border-box}html,body{margin:0}
+body{background:var(--bg);color:var(--tx);font:15px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;padding:14px;max-width:720px;margin:0 auto}
+h1{font-size:20px;margin:6px 0 2px}.s,.note{color:var(--mut);font-size:12.5px}
+.card{background:var(--card);border:1px solid var(--bd);border-radius:12px;padding:12px;margin-bottom:12px}
+label{display:block;font-size:12px;color:var(--mut);margin-bottom:3px}
+select,input{width:100%;padding:9px;border:1px solid var(--bd);border-radius:8px;background:var(--bg);color:var(--tx);font-size:15px}
+.g2{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+button{width:100%;margin-top:12px;padding:13px;border:0;border-radius:10px;background:var(--ac);color:#fff;font-size:16px;font-weight:700}
+.call{font-size:34px;font-weight:800;line-height:1.1}.buy{color:var(--g)}.sell{color:var(--r)}.wait{color:var(--y)}
+.st{background:var(--bg);border-radius:10px;padding:9px}.st b{display:block;font-size:17px}.st span{font-size:12px;color:var(--mut)}
+ul{margin:6px 0 0;padding-left:18px}li{margin:3px 0;font-size:13.5px}.p{color:var(--g)}.n{color:var(--r)}
+#err{color:var(--r);font-size:13px;margin:0 0 10px}
+</style>
+</head>
+<body>
+<h1>NSE 10-Min Signal Tool</h1>
+<p class="s">Multi-indicator analysis · paper trading · education only, not advice</p>
+<div class="card">
+  <div class="g2">
+    <div><label>Index / stock</label>
+      <select id="sym"><option value="nifty">NIFTY 50</option><option value="bank">BANK NIFTY</option><option value="fin">FIN NIFTY</option><option value="custom">Other stock (type below)</option></select></div>
+    <div><label>Hold time (minutes)</label><input type="number" id="hold" value="10" min="5" step="5"></div>
+  </div>
+  <div id="cw" hidden style="margin-top:8px"><label>Yahoo symbol, e.g. RELIANCE.NS, HDFCBANK.NS</label><input id="csym" value="HDFCBANK.NS"></div>
+  <button id="go">Get signal</button>
+</div>
+<p id="err"></p>
+<div id="res" hidden>
+  <div class="card">
+    <div id="call" class="call"></div>
+    <div id="sub" class="note" style="margin:4px 0 10px;font-size:13.5px"></div>
+    <div class="g2" id="lv"></div>
+    <p class="note" id="tm" style="margin:10px 0 0"></p>
+  </div>
+  <div class="card"><b>Why this call</b><ul id="why"></ul></div>
+  <div class="card"><b>Reality check: this setup on past data</b><div id="bt" style="margin-top:6px"></div></div>
+  <p class="note">Signals use completed 5-min candles from Yahoo Finance (can lag a few minutes). No indicator can predict the market; most intraday traders lose money. Paper trade first.</p>
+</div>
+<script>
+const $=id=>document.getElementById(id);
+const MAP={nifty:["^NSEI"],bank:["^NSEBANK"],fin:["NIFTY_FIN_SERVICE.NS","^CNXFIN"]};
+const TF=5,SLM=1,TPM=1.5,THR=3.5;
+function ist(ts){const p=new Intl.DateTimeFormat("en-CA",{timeZone:"Asia/Kolkata",hour12:false,year:"numeric",month:"2-digit",day:"2-digit",hour:"2-digit",minute:"2-digit"}).formatToParts(new Date(ts*1000));const g=k=>p.find(x=>x.type===k).value;const h=+g("hour")%24;return{day:g("year")+"-"+g("month")+"-"+g("day"),mod:h*60+ +g("minute")}}
+const hhmm=ts=>new Date(ts*1000).toLocaleTimeString("en-IN",{timeZone:"Asia/Kolkata",hour:"2-digit",minute:"2-digit",hour12:false});
+async function fetchOne(sym){
+  const u="https://query1.finance.yahoo.com/v8/finance/chart/"+encodeURIComponent(sym)+"?interval=5m&range=5d";
+  const px=[x=>"https://corsproxy.io/?"+encodeURIComponent(x),x=>"https://api.allorigins.win/raw?url="+encodeURIComponent(x),x=>x];
+  for(const f of px){try{const r=await fetch(f(u),{cache:"no-store"});const j=await r.json();if(j&&j.chart&&j.chart.result)return j.chart.result[0]}catch(e){}}
+  return null;
+}
+async function getData(list){
+  for(const s of list){const r=await fetchOne(s);if(r&&r.timestamp)return r}
+  throw new Error("Could not get market data. Check internet, wait a minute and tap again.");
+}
+function candles(res){
+  const t=res.timestamp,q=res.indicators.quote[0],now=Date.now()/1000,out=[];
+  for(let i=0;i<t.length;i++){
+    if([q.open[i],q.high[i],q.low[i],q.close[i]].some(v=>v==null))continue;
+    if(t[i]+TF*60>now)continue;
+    out.push({ts:t[i],...ist(t[i]),o:q.open[i],h:q.high[i],l:q.low[i],c:q.close[i],v:q.volume[i]||0});
+  }
+  return out;
+}
+const ema=(a,n)=>{const k=2/(n+1),r=[a[0]];for(let i=1;i<a.length;i++)r.push(a[i]*k+r[i-1]*(1-k));return r};
+const wild=(a,n)=>{const r=[a[0]];for(let i=1;i<a.length;i++)r.push((a[i]+r[i-1]*(n-1))/n);return r};
+
+function analyze(D,hold){
+  const n=D.length,C=D.map(x=>x.c);
+  const e9=ema(C,9),e21=ema(C,21),e50=ema(C,50),h1=ema(C,27),h2=ema(C,63);
+  const m=ema(C,12).map((v,i)=>v-ema(C,26)[i]);const m26=ema(C,26),m12=ema(C,12);
+  const macd=C.map((_,i)=>m12[i]-m26[i]),sg=ema(macd,9),hist=macd.map((v,i)=>v-sg[i]);
+  const up=[0],dn=[0],tr=[D[0].h-D[0].l],pdm=[0],mdm=[0];
+  for(let i=1;i<n;i++){
+    const d=C[i]-C[i-1];up.push(Math.max(d,0));dn.push(Math.max(-d,0));
+    tr.push(Math.max(D[i].h-D[i].l,Math.abs(D[i].h-C[i-1]),Math.abs(D[i].l-C[i-1])));
+    const u=D[i].h-D[i-1].h,dd=D[i-1].l-D[i].l;
+    pdm.push(u>dd&&u>0?u:0);mdm.push(dd>u&&dd>0?dd:0);
+  }
+  const au=wild(up,14),ad=wild(dn,14),rsi=au.map((u,i)=>ad[i]===0?100:100-100/(1+u/ad[i]));
+  const atr=wild(tr,14),pd=wild(pdm,14),md=wild(mdm,14);
+  const dx=atr.map((a,i)=>{const p=100*pd[i]/a,q=100*md[i]/a;return p+q===0?0:100*Math.abs(p-q)/(p+q)});
+  const adx=wild(dx,14);
+  const vw=[],orh=[],orl=[];let cd="",sv=0,spv=0,cnt=0,sp=0,dayStart=0;
+  D.forEach((x,i)=>{
+    if(x.day!==cd){cd=x.day;sv=spv=cnt=sp=0;dayStart=i}
+    const tp=(x.h+x.l+x.c)/3;sv+=x.v;spv+=tp*x.v;cnt++;sp+=tp;vw.push(sv>0?spv/sv:sp/cnt);
+    if(i-dayStart>=3){let hi=-1e9,lo=1e9;for(let k=dayStart;k<dayStart+3;k++){hi=Math.max(hi,D[k].h);lo=Math.min(lo,D[k].l)}orh.push(hi);orl.push(lo)}else{orh.push(null);orl.push(null)}
+  });
+  function score(i,notes){
+    let s=0;const add=(v,t)=>{s+=v;if(notes)notes.push([v,t])};
+    if(e9[i]>e21[i]&&e21[i]>e50[i])add(2,"EMA 9 > 21 > 50: strong uptrend");
+    else if(e9[i]<e21[i]&&e21[i]<e50[i])add(-2,"EMA 9 < 21 < 50: strong downtrend");
+    else add(e9[i]>e21[i]?1:-1,"EMA 9 vs 21 leans "+(e9[i]>e21[i]?"up":"down")+", but trend is not fully aligned");
+    add(C[i]>vw[i]?1:-1,"Price is "+(C[i]>vw[i]?"above":"below")+" VWAP");
+    const rising=hist[i]>hist[i-1];
+    add(hist[i]>0?(rising?1:0.5):(rising?-0.5:-1),"MACD momentum is "+(hist[i]>0?"positive":"negative")+" and "+(rising?"rising":"falling"));
+    const r=rsi[i];
+    if(r>=50&&r<70)add(1,"RSI "+r.toFixed(0)+": bullish, not overbought");
+    else if(r<50&&r>30)add(-1,"RSI "+r.toFixed(0)+": bearish, not oversold");
+    else if(r>=70)add(-0.5,"RSI "+r.toFixed(0)+": overbought, pullback risk");
+    else add(0.5,"RSI "+r.toFixed(0)+": oversold, bounce risk");
+    const t=h1[i]>h2[i]?1.5:-1.5;add(t,"15-min equivalent trend is "+(t>0?"up":"down"));
+    if(orh[i]!=null){if(C[i]>orh[i])add(1,"Price is above the opening-range high");else if(C[i]<orl[i])add(-1,"Price is below the opening-range low")}
+    if(adx[i]<18){s*=0.6;if(notes)notes.push([0,"ADX "+adx[i].toFixed(0)+": market is choppy, so the score is reduced"])}
+    return s;
+  }
+  const sc=new Array(n).fill(0),dir=new Array(n).fill(0);
+  for(let i=63;i<n;i++){sc[i]=score(i);dir[i]=sc[i]>=THR?1:sc[i]<=-THR?-1:0}
+  const hb=Math.max(1,Math.round(hold/TF)),R=[];
+  for(let i=64;i<n-1;i++){
+    if(!dir[i]||dir[i-1]===dir[i]||D[i].mod<570||D[i].mod>=900)continue;
+    const d=dir[i],en=C[i],a=atr[i];let res=null;
+    for(let j=i+1;j<=Math.min(n-1,i+hb);j++){
+      if(D[j].day!==D[i].day)break;
+      const hs=d===1?D[j].l<=en-a*SLM:D[j].h>=en+a*SLM,ht=d===1?D[j].h>=en+a*TPM:D[j].l<=en-a*TPM;
+      if(hs){res=-SLM;break}if(ht){res=TPM;break}
+      if(j===i+hb||j===n-1||D[j].mod>=915)res=d*(D[j].c-en)/a;
+    }
+    if(res!=null)R.push(res);
+  }
+  const last=n-1,notes=[];const s=score(last,notes);
+  let age=0;for(let i=last;i>=63&&dir[i]===dir[last]&&D[i].day===D[last].day&&dir[last]!==0;i--)age++;
+  return{n,sc:s,dir:dir[last],age,atr,notes,R,last};
+}
+function render(D,A,hold){
+  const L=D[A.last],now=Date.now()/1000,lag=(now-L.ts)/60;
+  $("res").hidden=false;
+  const stale=lag>TF*4;
+  let cls="wait",call="NO TRADE",sub="Signals are mixed. Waiting is a position too.",lv="",tm="";
+  const dname=d=>d===1?"BUY":"SELL";
+  if(stale){call="MARKET CLOSED";sub="Latest data is "+Math.round(lag)+" min old. NSE trades 9:15 to 15:30 IST, Monday to Friday.";}
+  else if(A.dir!==0){
+    const i0=A.last-A.age+1,E=D[i0],d=A.dir,en=E.c,a=A.atr[i0];
+    const tp=en+d*a*TPM,sl=en-d*a*SLM,entTs=E.ts+TF*60,endTs=entTs+hold*60,left=Math.ceil((endTs-now)/60);
+    let out=null;
+    for(let j=i0+1;j<=A.last;j++){const hs=d===1?D[j].l<=sl:D[j].h>=sl,ht=d===1?D[j].h>=tp:D[j].l<=tp;if(hs){out="STOP-LOSS";break}if(ht){out="TARGET";break}}
+    const pnl=d*(L.c-en);
+    if(out){call="EXIT NOW";cls=out==="TARGET"?"buy":"sell";sub=(out==="TARGET"?"Target reached":"Stop-loss level touched")+" on the "+dname(d)+" call from "+hhmm(entTs)+". Do not chase; wait for a new setup."}
+    else if(L.mod>=915){call="SQUARE OFF";sub="Market close is near (15:15 to 15:30). Close intraday positions."}
+    else if(L.mod>=900&&A.age===1){call="NO NEW TRADE";sub="After 15:00 IST. A new entry has too little time."}
+    else if(left<=0){call="BOOK PROFIT / EXIT";cls="wait";sub="The "+hold+"-minute window for the "+dname(d)+" call is over. Close the paper trade."}
+    else{
+      cls=d===1?"buy":"sell";
+      call=(A.age===1?dname(d)+" NOW":"HOLD "+dname(d));
+      sub=A.age===1?"Fresh "+(d===1?"bullish":"bearish")+" setup on the latest closed candle.":"This "+dname(d)+" call is already running ("+A.age+" candles old). Stay in until target, stop, or time is up.";
+      tm="Hold until "+hhmm(endTs)+" IST ("+left+" min left). Entry was about "+hhmm(entTs)+".";
+    }
+    if(!stale)lv=card("Entry (approx)",en.toFixed(1))+card("Target",tp.toFixed(1))+card("Stop-loss",sl.toFixed(1))+card("Now vs entry",(pnl>=0?"+":"")+pnl.toFixed(1)+" pts")+card("Signal strength",Math.abs(A.sc).toFixed(1)+" / 7.5")+card("Risk : Reward","1 : "+TPM);
+  }else{
+    lv=card("Last price",L.c.toFixed(1))+card("Score",A.sc.toFixed(1)+" (need ±"+THR+")");
+  }
+  $("call").textContent=call;$("call").className="call "+cls;$("sub").textContent=sub;$("lv").innerHTML=lv;
+  $("tm").textContent=(tm?tm+" ":"")+"Last closed candle: "+hhmm(L.ts)+" IST. Auto-refreshes every 30 s.";
+  $("why").innerHTML=A.notes.map(x=>`<li class="${x[0]>0?"p":x[0]<0?"n":""}">${x[1]}</li>`).join("");
+  const R=A.R;
+  if(R.length<5){$("bt").textContent="Too few past signals on this data to judge ("+R.length+").";return}
+  const w=R.filter(x=>x>0).length,ex=R.reduce((a,b)=>a+b,0)/R.length;
+  $("bt").innerHTML=`<div class="g2">${card("Past signals (5 days)",R.length)}${card("Win rate",(w*100/R.length).toFixed(0)+"%")}${card("Avg result per trade",(ex>=0?"+":"")+ex.toFixed(2)+" R")}${card("Avg gain (R=1 stop)",ex>0?"Positive":"Negative")}</div><p class="note" style="margin:8px 0 0">`+(ex>0?"Positive on recent data, but 5 days is a small sample. Treat it as a guide only.":"This setup did NOT make money on the recent data for this symbol. Prefer to skip trades.")+" R = one stop-loss distance.</p>";
+}
+const card=(l,v)=>`<div class="st"><b>${v}</b><span>${l}</span></div>`;
+let timer=null;
+async function tick(){
+  const k=$("sym").value,list=k==="custom"?[$("csym").value.trim()]:MAP[k],hold=Math.max(5,+$("hold").value||10);
+  try{
+    const D=candles(await getData(list));
+    if(D.length<80)throw new Error("Not enough candles yet. Try again when the market is open.");
+    render(D,analyze(D,hold),hold);$("err").textContent="";
+  }catch(e){$("err").textContent=e.message}
+}
+$("sym").onchange=()=>{$("cw").hidden=$("sym").value!=="custom"};
+$("go").onclick=()=>{
+  if(timer){clearInterval(timer);timer=null;$("go").textContent="Get signal";return}
+  $("go").textContent="Stop auto-refresh";$("err").textContent="Fetching live data...";tick();timer=setInterval(tick,30000);
+};
+</script>
+</body>
+</html>
